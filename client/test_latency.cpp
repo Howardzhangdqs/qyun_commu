@@ -44,6 +44,8 @@ int main(int argc, char* argv[]) {
   std::string host_name = "localhost:8000";
   std::string channel_name = "test";
 
+  regist_websocket_callback(websocket_callback);
+
   create_channel(host_name, channel_name);
 
   // 创建监听线程

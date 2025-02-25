@@ -87,7 +87,7 @@ extern int websocket_callback(struct lws* wsi, enum lws_callback_reasons reason,
 
 // WebSocket协议配置
 static struct lws_protocols protocols[] = {
-    {"channel-protocol", websocket_callback, 0, 0}, {NULL, NULL, 0, 0}};
+    {"channel-protocol", websocket_callback_wrapper, 0, 0}, {NULL, NULL, 0, 0}};
 
 // 监听频道函数
 int listen_channel(const std::string& host_name,
@@ -108,23 +108,35 @@ int listen_channel(const std::string& host_name,
     return -1;
   }
 
+  // Split host_name into host and port
+  size_t colon_pos = host_name.find(':');
+  std::string host = host_name.substr(0, colon_pos);
+  int port = std::stoi(host_name.substr(colon_pos + 1));
+
+  std::cout << "[Qyun Commu Client] Connecting to WebSocket: " << host << ":"
+            << port << std::endl;
+
   std::string path = "/channel/listen/" + channel_name;
+  std::string origin = "http://" + host_name;
+
   ccinfo.context = context;
-  ccinfo.address = "localhost";
-  ccinfo.port = 8000;
+  ccinfo.address = host.c_str();
+  ccinfo.port = port;
   ccinfo.path = path.c_str();
-  ccinfo.host = "localhost";
-  ccinfo.origin = "http://localhost:8000";
+  ccinfo.host = host.c_str();
+  ccinfo.origin = origin.c_str();
   ccinfo.protocol = protocols[0].name;
 
   struct lws* wsi = lws_client_connect_via_info(&ccinfo);
   if (!wsi) {
-    std::cerr << "Failed to connect to WebSocket" << std::endl;
+    std::cerr << "[Qyun Commu Client] Failed to connect to WebSocket"
+              << std::endl;
     lws_context_destroy(context);
     return -1;
   }
 
-  std::cout << "Listening on channel: " << channel_name << std::endl;
+  std::cout << "[Qyun Commu Client] Listening on channel: " << channel_name
+            << std::endl;
   while (true) {
     lws_service(context, 0);
   }
