@@ -72,3 +72,32 @@ async def send_message(name: str, message: str):
             channel.connections.remove(ws)
 
     return {"status": "success", "message": "Message broadcasted"}
+
+@app.websocket("/channel/send/{name}")
+async def websocket_send(websocket: WebSocket, name: str):
+    if name not in channel_manager.channels:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    
+    await websocket.accept()
+    
+    try:
+        while True:
+            message = await websocket.receive_text()
+            channel = channel_manager.channels[name]
+
+            print(f"Received message: {message}")
+            
+            async with channel.lock:
+                disconnected = []
+                for ws in channel.connections:
+                    try:
+                        await ws.send_text(message)
+                    except Exception:
+                        disconnected.append(ws)
+                
+                for ws in disconnected:
+                    channel.connections.remove(ws)
+    except Exception as e:
+        print(f"WebSocket error: {str(e)}")
+        # The connection might already be closed, so we don't try to close it again

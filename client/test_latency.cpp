@@ -48,16 +48,14 @@ int main(int argc, char* argv[]) {
 
   create_channel(host_name, channel_name);
 
-  // 创建监听线程
   std::thread listener(listen_channel, host_name, channel_name);
-  listener.detach();  // 分离线程使其独立运行
+  listener.detach();
 
   int test_count = 0;
   while (test_count < 100) {
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(100));  // C++标准库的sleep
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000 / 30));
 
-    send_message(host_name, channel_name, "Hello, World!");
+    send_message_ws(host_name, channel_name, "Hello, World!");
     // 记录发送消息的时间
     send_time = std::chrono::high_resolution_clock::now();
     test_count++;

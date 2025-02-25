@@ -82,8 +82,178 @@ bool send_message(const std::string& host_name, const std::string& channel,
   return success;
 }
 
-extern int websocket_callback(struct lws* wsi, enum lws_callback_reasons reason,
-                              void* user, void* in, size_t len);
+// 用于保持WebSocket连接的全局变量
+static struct lws_context* g_ws_context = nullptr;
+static struct lws* g_ws_wsi = nullptr;
+static std::string g_pending_message;
+static bool g_message_sent = false;
+static std::string g_current_channel;
+static std::string g_current_host;
+
+// WebSocket写消息回调
+static int ws_send_callback(struct lws* wsi, enum lws_callback_reasons reason,
+                            void* user, void* in, size_t len) {
+  switch (reason) {
+    case LWS_CALLBACK_CLIENT_ESTABLISHED:
+      // 连接建立后发送消息
+      lws_callback_on_writable(wsi);
+      break;
+    case LWS_CALLBACK_CLIENT_WRITEABLE: {
+      if (!g_pending_message.empty()) {
+        // 准备发送的消息需要添加LWS协议头部
+        unsigned char buf[LWS_PRE + g_pending_message.length() + 1];
+        memcpy(&buf[LWS_PRE], g_pending_message.c_str(),
+               g_pending_message.length());
+
+        // 发送消息
+        int result = lws_write(wsi, &buf[LWS_PRE], g_pending_message.length(),
+                               LWS_WRITE_TEXT);
+        if (result < 0) {
+          std::cerr << "WebSocket write failed" << std::endl;
+          return -1;
+        }
+        g_message_sent = true;
+        g_pending_message.clear();
+      }
+      break;
+    }
+    case LWS_CALLBACK_CLOSED:
+      // 连接关闭，清理资源
+      g_ws_wsi = nullptr;
+      break;
+    default:
+      break;
+  }
+  return 0;
+}
+
+// WebSocket协议配置(仅用于发送)
+static struct lws_protocols send_protocols[] = {
+    {"sender-protocol", ws_send_callback, 0, 0}, {NULL, NULL, 0, 0}};
+
+// 通过WebSocket发送消息
+bool send_message_ws(const std::string& host_name, const std::string& channel,
+                     const std::string& message) {
+  // 如果需要新建连接或切换通道
+  if (!g_ws_context || g_current_host != host_name ||
+      g_current_channel != channel) {
+    // 清理旧连接
+    if (g_ws_context) {
+      lws_context_destroy(g_ws_context);
+      g_ws_context = nullptr;
+      g_ws_wsi = nullptr;
+    }
+
+    // 创建新的WebSocket连接
+    struct lws_context_creation_info info;
+    memset(&info, 0, sizeof(info));
+    info.port = CONTEXT_PORT_NO_LISTEN;
+    info.protocols = send_protocols;
+    info.gid = -1;
+    info.uid = -1;
+
+    g_ws_context = lws_create_context(&info);
+    if (!g_ws_context) {
+      std::cerr << "Failed to create WebSocket context" << std::endl;
+      return false;
+    }
+
+    // 分离主机名和端口
+    size_t colon_pos = host_name.find(':');
+    std::string host = host_name.substr(0, colon_pos);
+    int port = std::stoi(host_name.substr(colon_pos + 1));
+
+    std::string path = "/channel/send/" + channel;
+    std::string origin = "http://" + host_name;
+
+    struct lws_client_connect_info ccinfo = {0};
+    ccinfo.context = g_ws_context;
+    ccinfo.address = host.c_str();
+    ccinfo.port = port;
+    ccinfo.path = path.c_str();
+    ccinfo.host = host.c_str();
+    ccinfo.origin = origin.c_str();
+    ccinfo.protocol = send_protocols[0].name;
+
+    g_ws_wsi = lws_client_connect_via_info(&ccinfo);
+    if (!g_ws_wsi) {
+      std::cerr << "Failed to connect to WebSocket for sending" << std::endl;
+      lws_context_destroy(g_ws_context);
+      g_ws_context = nullptr;
+      return false;
+    }
+
+    // 保存当前连接信息
+    g_current_host = host_name;
+    g_current_channel = channel;
+  }
+
+  // 设置要发送的消息
+  g_pending_message = message;
+  g_message_sent = false;
+
+  // 标记连接可写并处理事件
+  if (g_ws_wsi) {
+    lws_callback_on_writable(g_ws_wsi);
+
+    // 尝试处理WebSocket事件，直到消息发送或超时
+    int timeout = 100;  // 10秒超时
+    while (!g_message_sent && timeout > 0) {
+      lws_service(g_ws_context, 100);  // 100ms服务间隔
+      timeout--;
+    }
+
+    return g_message_sent;
+  }
+
+  return false;
+}
+
+// Define a type for the WebSocket callback function
+typedef int (*websocket_callback_fn)(struct lws* wsi,
+                                     enum lws_callback_reasons reason,
+                                     void* user, void* in, size_t len);
+
+// Global pointer to store the registered callback
+static websocket_callback_fn g_websocket_callback = nullptr;
+
+// Function to register a custom callback
+void regist_websocket_callback(websocket_callback_fn callback) {
+  g_websocket_callback = callback;
+}
+
+// Default WebSocket callback implementation
+int default_websocket_callback(struct lws* wsi,
+                               enum lws_callback_reasons reason, void* user,
+                               void* in, size_t len) {
+  switch (reason) {
+    case LWS_CALLBACK_CLIENT_ESTABLISHED:
+      std::cout << "Connected to WebSocket server" << std::endl;
+      break;
+    case LWS_CALLBACK_CLIENT_RECEIVE: {
+      std::cout << "Received: " << std::string((char*)in, len) << std::endl;
+      break;
+    }
+    case LWS_CALLBACK_CLIENT_CLOSED:
+      std::cout << "Connection closed" << std::endl;
+      break;
+    default:
+      break;
+  }
+  return 0;
+}
+
+// Dispatcher callback used by libwebsockets
+int websocket_callback_wrapper(struct lws* wsi,
+                               enum lws_callback_reasons reason, void* user,
+                               void* in, size_t len) {
+  // If a custom callback is registered, use it; otherwise use the default
+  if (g_websocket_callback) {
+    return g_websocket_callback(wsi, reason, user, in, len);
+  } else {
+    return default_websocket_callback(wsi, reason, user, in, len);
+  }
+}
 
 // WebSocket协议配置
 static struct lws_protocols protocols[] = {
